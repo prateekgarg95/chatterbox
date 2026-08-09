@@ -73,6 +73,24 @@ docker build \
   - bump `CHATTERBOX_FORK_COMMIT` in the Dockerfile to pick up new commits
     on `master` here; it's pinned to an exact SHA, not a moving branch
     head, on purpose.
+- The flash-attn compile is a real `docker build` step, not something
+  fetched from an external wheel host - so it's only ever slow **once**:
+  the Dockerfile positions that `RUN` immediately after the `torch`
+  install, before `CHATTERBOX_FORK_COMMIT`/requirements/app-code layers,
+  so Docker's own layer cache reuses the compiled wheel across every
+  later build on the same host (fork-commit bumps included) - only a
+  torch/CUDA/Python version change invalidates it. On a fresh host/CI
+  runner with no local cache, seed it once from a registry instead of
+  recompiling:
+  ```bash
+  docker buildx build \
+    -f docker/Dockerfile.chatterbox_hinglish \
+    --build-arg BUILD_FLASH_ATTN=1 \
+    --cache-to type=registry,ref=<registry>/chatterbox-hinglish-cache,mode=max \
+    --cache-from type=registry,ref=<registry>/chatterbox-hinglish-cache \
+    -t chatterbox-hinglish:latest \
+    --load .
+  ```
 
 To run via compose instead (needs either a real `HF_TOKEN` or a
 local-checkpoint bind-mount override - see that repo's
