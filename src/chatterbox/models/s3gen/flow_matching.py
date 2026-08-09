@@ -75,7 +75,7 @@ class ConditionalCFM(BASECFM):
             t_span = 1 - torch.cos(t_span * 0.5 * torch.pi)
         return self.solve_euler(z, t_span=t_span, mu=mu, mask=mask, spks=spks, cond=cond), flow_cache
 
-    def solve_euler(self, x, t_span, mu, mask, spks, cond, meanflow=False):
+    def solve_euler(self, x, t_span, mu, mask, spks, cond, meanflow=False, graph_mode=False):
         """
         Fixed euler solver for ODEs.
         Args:
@@ -90,6 +90,9 @@ class ConditionalCFM(BASECFM):
                 shape: (batch_size, spk_emb_dim)
             cond: Not used but kept for future purposes
             meanflow: meanflow mode
+            graph_mode: forwarded to the estimator - see
+                add_optional_chunk_mask's own docstring. Only CFMDecodeGraph
+                passes True, having already verified capture eligibility.
         """
         in_dtype = x.dtype
         x, t_span, mu, mask, spks, cond = cast_all(x, t_span, mu, mask, spks, cond, dtype=self.estimator.dtype)
@@ -133,7 +136,7 @@ class ConditionalCFM(BASECFM):
             r_in[:B] = r_in[B:] = r # (only used for meanflow)
             dxdt = self.estimator.forward(
                 x=x_in, mask=mask_in, mu=mu_in, t=t_in, spks=spks_in, cond=cond_in,
-                r=r_in if meanflow else None,
+                r=r_in if meanflow else None, graph_mode=graph_mode,
             )
             dxdt, cfg_dxdt = torch.split(dxdt, [B, B], dim=0)
             dxdt = ((1.0 + self.inference_cfg_rate) * dxdt - self.inference_cfg_rate * cfg_dxdt)

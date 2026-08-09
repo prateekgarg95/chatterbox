@@ -86,7 +86,8 @@ class CFMDecodeGraph:
     def _forward_once(self, bucket: int) -> torch.Tensor:
         buf = self._buffers[bucket]
         return self.cfm.solve_euler(
-            buf["x"], buf["t_span"], buf["mu"], buf["mask"], buf["spks"], buf["cond"], meanflow=False,
+            buf["x"], buf["t_span"], buf["mu"], buf["mask"], buf["spks"], buf["cond"],
+            meanflow=False, graph_mode=True,
         )
 
     def _capture(self, bucket: int) -> torch.Tensor:

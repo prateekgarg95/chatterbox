@@ -240,7 +240,7 @@ class ConditionalDecoder(nn.Module):
                 if m.bias is not None:
                     nn.init.constant_(m.bias, 0)
 
-    def forward(self, x, mask, mu, t, spks=None, cond=None, r=None):
+    def forward(self, x, mask, mu, t, spks=None, cond=None, r=None, graph_mode: bool = False):
         """Forward pass of the UNet1DConditional model.
 
         Args:
@@ -250,6 +250,9 @@ class ConditionalDecoder(nn.Module):
             spks (_type_, optional) Defaults to None.
             cond (_type_, optional)
             r: end time for meanflow mode (shape (1,) tensor)
+            graph_mode: see add_optional_chunk_mask's own docstring - set
+                True only by CFMDecodeGraph, which has already verified
+                CUDA-graph-capture eligibility.
 
         Raises:
             ValueError: _description_
@@ -282,7 +285,7 @@ class ConditionalDecoder(nn.Module):
             x = resnet(x, mask_down, t)
             x = rearrange(x, "b c t -> b t c").contiguous()
             # attn_mask = torch.matmul(mask_down.transpose(1, 2).contiguous(), mask_down)
-            attn_mask = add_optional_chunk_mask(x, mask_down.bool(), False, False, 0, self.static_chunk_size, -1)
+            attn_mask = add_optional_chunk_mask(x, mask_down.bool(), False, False, 0, self.static_chunk_size, -1, graph_mode=graph_mode)
             attn_mask = mask_to_bias(attn_mask == 1, x.dtype)
             for transformer_block in transformer_blocks:
                 x = transformer_block(
@@ -301,7 +304,7 @@ class ConditionalDecoder(nn.Module):
             x = resnet(x, mask_mid, t)
             x = rearrange(x, "b c t -> b t c").contiguous()
             # attn_mask = torch.matmul(mask_mid.transpose(1, 2).contiguous(), mask_mid)
-            attn_mask = add_optional_chunk_mask(x, mask_mid.bool(), False, False, 0, self.static_chunk_size, -1)
+            attn_mask = add_optional_chunk_mask(x, mask_mid.bool(), False, False, 0, self.static_chunk_size, -1, graph_mode=graph_mode)
             attn_mask = mask_to_bias(attn_mask == 1, x.dtype)
             for transformer_block in transformer_blocks:
                 x = transformer_block(
@@ -318,7 +321,7 @@ class ConditionalDecoder(nn.Module):
             x = resnet(x, mask_up, t)
             x = rearrange(x, "b c t -> b t c").contiguous()
             # attn_mask = torch.matmul(mask_up.transpose(1, 2).contiguous(), mask_up)
-            attn_mask = add_optional_chunk_mask(x, mask_up.bool(), False, False, 0, self.static_chunk_size, -1)
+            attn_mask = add_optional_chunk_mask(x, mask_up.bool(), False, False, 0, self.static_chunk_size, -1, graph_mode=graph_mode)
             attn_mask = mask_to_bias(attn_mask == 1, x.dtype)
             for transformer_block in transformer_blocks:
                 x = transformer_block(

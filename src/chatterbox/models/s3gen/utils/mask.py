@@ -93,7 +93,8 @@ def add_optional_chunk_mask(xs: torch.Tensor,
                             decoding_chunk_size: int,
                             static_chunk_size: int,
                             num_decoding_left_chunks: int,
-                            enable_full_context: bool = True):
+                            enable_full_context: bool = True,
+                            graph_mode: bool = False):
     """ Apply optional mask for encoder.
 
     Args:
@@ -116,6 +117,16 @@ def add_optional_chunk_mask(xs: torch.Tensor,
         enable_full_context (bool):
             True: chunk size is either [1, 25] or full context(max_len)
             False: chunk size ~ U[1, 25]
+        graph_mode (bool): set True only by a caller that has already
+            verified CUDA-graph-capture eligibility (see
+            cuda_graph.CFMDecodeGraph) - skips the diagnostic `.any()`/
+            warning-log branch below, which forces an illegal host sync
+            mid-capture ("operation not permitted when stream is
+            capturing"), while still applying the SAME masked_fill
+            unconditionally either way - this is a real, expected case
+            under CFMDecodeGraph's own bucket-padding design (the padded
+            suffix of a bucket is an all-false mask row by construction),
+            not a rare edge case.
 
     Returns:
         torch.Tensor: chunk mask of the input xs.
@@ -158,9 +169,14 @@ def add_optional_chunk_mask(xs: torch.Tensor,
     else:
         chunk_masks = masks
     assert chunk_masks.dtype == torch.bool
-    if (chunk_masks.sum(dim=-1) == 0).sum().item() != 0:
+    all_false_rows = chunk_masks.sum(dim=-1) == 0
+    if not graph_mode and all_false_rows.any():
         logging.warning('get chunk_masks all false at some timestep, force set to true, make sure they are masked in futuer computation!')
-        chunk_masks[chunk_masks.sum(dim=-1)==0] = True
+    # Unconditional in both modes - identical effect to the original
+    # conditional assignment when the condition is true, a no-op when it's
+    # not (masked_fill on an all-False mask changes nothing), but doesn't
+    # itself need a host sync the way `if (...).sum().item() != 0:` did.
+    chunk_masks = chunk_masks.masked_fill(all_false_rows.unsqueeze(-1), True)
     return chunk_masks
 
 
