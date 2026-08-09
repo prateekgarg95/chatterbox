@@ -154,4 +154,14 @@ class CFMDecodeGraph:
             self._capture(bucket)
         else:
             self._graphs[bucket].replay()
-        return buf["out"][:, :, :t_actual].to(out_dtype)
+        # .clone() is load-bearing, not defensive style: buf["out"] is the
+        # graph's OWN static output buffer, mutated in place by every
+        # subsequent replay() for this bucket - handing back a view (which
+        # `.to(dtype)` silently is, whenever the dtype already matches) lets
+        # a caller's "result" mutate out from under them the next time this
+        # bucket runs. Confirmed as a real, reproducible bug (not a
+        # theoretical one) via a direct correctness test: two consecutive
+        # calls with genuinely different inputs, same bucket, returned
+        # bit-identical tensors (both views into the same storage) before
+        # this fix.
+        return buf["out"][:, :, :t_actual].clone().to(out_dtype)
