@@ -191,6 +191,13 @@ class CausalConditionalCFM(ConditionalCFM):
         super().__init__(in_channels, cfm_params, n_spks, spk_emb_dim, estimator)
         # TODO: BAD BAD IDEA - IT'LL MESS UP DISTILLATION - SETTING TO NONE
         self.rand_noise = None
+        # Optional `cuda_graph.CFMDecodeGraph` - not constructed here (this
+        # class has no opinion on graph capture by itself); a caller sets
+        # this post-construction once S3Gen is loaded and warm (see
+        # cuda_graph.py's own docstring). None means "no graph, always use
+        # the eager solve_euler path below" - the default, unchanged
+        # behavior for anyone not opting in.
+        self.cuda_graph = None
 
     @torch.inference_mode()
     def forward(self, mu, mask, n_timesteps, temperature=1.0, spks=None, cond=None, noised_mels=None, meanflow=False):
@@ -213,6 +220,23 @@ class CausalConditionalCFM(ConditionalCFM):
         """
 
         B = mu.size(0)
+
+        # CUDA-graph fast path: only for the plain (non-meanflow) case a
+        # `CFMDecodeGraph` was actually built for - batch size 1 (S3Gen's
+        # own single-request-per-call contract), no `noised_mels` override,
+        # and the exact `n_timesteps` the graph was captured with (the ODE
+        # step count is baked into the graph, not a runtime parameter once
+        # captured). Anything outside that falls through to the unchanged
+        # eager path below - this is purely additive.
+        if (
+            not meanflow
+            and self.cuda_graph is not None
+            and B == 1
+            and noised_mels is None
+            and n_timesteps == self.cuda_graph.n_timesteps
+        ):
+            return self.cuda_graph.run(mu.size(2), mu=mu, mask=mask, spks=spks, cond=cond), None
+
         z = torch.randn_like(mu)
 
         if noised_mels is not None:
