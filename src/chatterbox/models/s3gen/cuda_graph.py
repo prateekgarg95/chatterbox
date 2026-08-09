@@ -61,6 +61,20 @@ class CFMDecodeGraph:
         # Per-bucket static buffers - allocated lazily on first use of that
         # bucket, then reused (`.copy_()`/`.zero_()` in place) forever.
         self._buffers: dict[int, dict[str, torch.Tensor]] = {}
+        # A DEDICATED stream, created once, used for ALL warmup/capture/
+        # replay work this instance ever does - never the calling thread's
+        # own "current stream". Load-bearing, not defensive: confirmed via
+        # a direct real-GPU repro (a background thread continuously
+        # issuing unrelated CUDA work, mimicking EngineLoop's own T3
+        # decode loop, concurrently with this class's capture) that
+        # WITHOUT this, both threads' `torch.cuda.current_stream()` are
+        # the SAME literal stream object (CUDA's shared legacy default
+        # stream, `cuda_stream=0x0` - neither host thread gets its own
+        # stream automatically) - capturing on a stream another thread is
+        # ALSO actively enqueuing work to is illegal regardless of
+        # `capture_error_mode`. A private stream this class alone ever
+        # touches removes that sharing entirely.
+        self._stream = torch.cuda.Stream(device=device)
 
     def bucket_for(self, t_actual: int) -> int:
         for b in self.bucket_lens:
@@ -100,34 +114,48 @@ class CFMDecodeGraph:
         """
         assert bucket not in self._graphs, f"CFMDecodeGraph bucket {bucket} captured twice"
 
-        s = torch.cuda.Stream()
+        s = self._stream
         s.wait_stream(torch.cuda.current_stream())
         with torch.cuda.stream(s):
             for _ in range(_WARMUP_ITERS):
                 self._forward_once(bucket)
-        torch.cuda.current_stream().wait_stream(s)
 
-        graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(graph):
-            out = self._forward_once(bucket)
-        self._graphs[bucket] = graph
-        self._buffers[bucket]["out"] = out
-        # `torch.cuda.graph(...)` CAPTURE IS PURE TRACING - confirmed via a
-        # direct, isolated test (a trivial `y.copy_(x + 1)` capture, with
-        # `y` explicitly zeroed beforehand, stayed all-zero immediately
-        # after the `with torch.cuda.graph(...)` block ended and only
-        # became correct after an explicit `.replay()`). `out` above is
-        # freshly allocated inside the graph's own private memory pool
-        # during that untraced pass, so its content at this point is
-        # uninitialized/undefined, NOT a real forward pass result -
-        # replaying once, right here, is what actually computes it. This
-        # class's own real-GPU correctness test caught this: without this
-        # replay, the graph path returned all-zero output instead of a
-        # real CFM result, while comparison against a genuine eager
-        # reference (cfm.cuda_graph = None) was masked by an earlier,
-        # separately-fixed buffer-aliasing bug that made two views into
-        # the same buffer trivially compare equal.
-        graph.replay()
+            graph = torch.cuda.CUDAGraph()
+            # `capture_error_mode="thread_local"` is STILL needed even on a
+            # dedicated stream: torch's DEFAULT ("global") capture mode
+            # treats ANY other stream in the WHOLE PROCESS enqueuing new
+            # work as an error for the ENTIRE duration of ANY capture,
+            # regardless of which stream is being captured - it does not
+            # stop being global just because this capture itself is
+            # isolated to its own stream. "thread_local" narrows that rule
+            # to "other streams on the SAME thread as the capture" - since
+            # EngineLoop's T3 decode loop runs on a different THREAD
+            # entirely, its stream is correctly excluded once both fixes
+            # (dedicated stream + thread_local) are combined. Confirmed via
+            # a direct real-GPU repro: neither fix alone was sufficient,
+            # only together.
+            with torch.cuda.graph(graph, capture_error_mode="thread_local"):
+                out = self._forward_once(bucket)
+            self._graphs[bucket] = graph
+            self._buffers[bucket]["out"] = out
+            # `torch.cuda.graph(...)` CAPTURE IS PURE TRACING - confirmed
+            # via a direct, isolated test (a trivial `y.copy_(x + 1)`
+            # capture, with `y` explicitly zeroed beforehand, stayed
+            # all-zero immediately after the `with torch.cuda.graph(...)`
+            # block ended and only became correct after an explicit
+            # `.replay()`). `out` above is freshly allocated inside the
+            # graph's own private memory pool during that untraced pass,
+            # so its content at this point is uninitialized/undefined, NOT
+            # a real forward pass result - replaying once, right here, is
+            # what actually computes it. This class's own real-GPU
+            # correctness test caught this: without this replay, the graph
+            # path returned all-zero output instead of a real CFM result,
+            # while comparison against a genuine eager reference
+            # (cfm.cuda_graph = None) was masked by an earlier, separately-
+            # fixed buffer-aliasing bug that made two views into the same
+            # buffer trivially compare equal.
+            graph.replay()
+        torch.cuda.current_stream().wait_stream(s)
         return self._buffers[bucket]["out"]
 
     def run(
@@ -169,7 +197,18 @@ class CFMDecodeGraph:
         if not self.is_captured(bucket):
             self._capture(bucket)
         else:
-            self._graphs[bucket].replay()
+            # Replay on the SAME dedicated stream capture used, not
+            # whatever the calling thread's own current stream happens to
+            # be - keeps this class's GPU work consistently isolated from
+            # concurrent T3 decode on every call, not just the first
+            # (capture) one, per the same real-GPU-confirmed reasoning in
+            # `_capture()`. `wait_stream` makes the calling thread's
+            # subsequent read of `buf["out"]` correctly ordered after the
+            # replay completes, without forcing a full device sync.
+            self._stream.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(self._stream):
+                self._graphs[bucket].replay()
+            torch.cuda.current_stream().wait_stream(self._stream)
         # .clone() is load-bearing, not defensive style: buf["out"] is the
         # graph's OWN static output buffer, mutated in place by every
         # subsequent replay() for this bucket - handing back a view (which
