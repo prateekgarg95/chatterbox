@@ -12,6 +12,81 @@
 
 **Chatterbox** is a family of state-of-the-art, open-source text-to-speech models by Resemble AI.
 
+## This fork (`prateekgarg95/chatterbox`)
+
+This is `HashStudioz`'s fork of upstream `resemble-ai/chatterbox`, pinned
+and consumed by the `chatterbox_hinglish` serving engine in
+[`Test-To-Speech`](https://github.com/prateekgarg95/Test-To-Speech)
+(`docker/Dockerfile.chatterbox_hinglish`'s `ARG CHATTERBOX_FORK_COMMIT`).
+`master` is the branch of record - all changes below are on `master`,
+tracked as far ahead of the pinned upstream commit
+(`5de7a54aa4e5e2baadb0182dde554908b48b85c2`) as this fork's own history
+shows.
+
+**S3Gen changes on top of upstream** (all in `src/chatterbox/models/s3gen/`):
+- `cuda_graph.py` (new) - `CFMDecodeGraph`: per-bucket-length CUDA graph
+  capture/replay for the CFM Euler decode loop (`solve_euler`), mirroring
+  the serving repo's own `engine/cuda_graph.py` pattern for T3. Capture
+  happens at server startup (not lazily on first request) to avoid a
+  process-global CUDA RNG conflict with concurrent T3 sampling on another
+  thread/stream.
+- `utils/mask.py` - `add_optional_chunk_mask` gained an opt-in `graph_mode`
+  flag that skips a host-sync-forcing `.sum().item()` diagnostic check
+  (threaded down through `solve_euler` -> `ConditionalDecoder.forward`),
+  required for CUDA graph capture to succeed at all.
+- `s3gen.py` - guarded the trim-fade slice
+  (`output_wavs[:, :fade_len] *= self.trim_fade[:fade_len]`, both
+  `forward()` and `inference()`) against output shorter than the 960-sample
+  fade window, which previously crashed on short audio (ported from
+  `rsxdalv/chatterbox` PR #19).
+- `decoder.py`, `flow_matching.py` - plumbing for the above (`graph_mode`
+  threading, static-buffer-friendly shapes).
+
+Real, GPU-measured result (L4 box, production checkpoint/reference clip):
+**~33-34% TTFB reduction, ~11-24% RTF reduction** end-to-end with the S3Gen
+CUDA graph enabled (`CHATTERBOX_S3GEN_CUDA_GRAPH_BUCKETS` set in the
+serving repo). Full investigation trail, including two real production
+crashes found and fixed along the way, is documented in the serving repo's
+own project plan (Workstream 1).
+
+### Building the serving image against this fork
+
+The actual Docker image that consumes this fork lives in the
+`Test-To-Speech` repo, not here. From that repo's root, on the GPU box:
+
+```bash
+docker build \
+  -f docker/Dockerfile.chatterbox_hinglish \
+  --build-arg BUILD_FLASH_ATTN=1 \
+  -t chatterbox-hinglish:latest \
+  .
+```
+
+- Build context must be `.` (repo root), not `docker/` -
+  `.dockerignore` only applies at the context root.
+- `--build-arg BUILD_FLASH_ATTN=1` triggers a real ~16-minute
+  `FLASH_ATTENTION_FORCE_BUILD=TRUE` compile (not a downloaded wheel) -
+  the compose default (`BUILD_FLASH_ATTN=0`) is a real, working but
+  slower config (~0.67s TTFB vs ~0.47-0.48s).
+- The image installs this fork via
+  `pip install --no-deps "chatterbox-tts @ git+https://github.com/prateekgarg95/chatterbox.git@${CHATTERBOX_FORK_COMMIT}"`
+  - bump `CHATTERBOX_FORK_COMMIT` in the Dockerfile to pick up new commits
+    on `master` here; it's pinned to an exact SHA, not a moving branch
+    head, on purpose.
+
+To run via compose instead (needs either a real `HF_TOKEN` or a
+local-checkpoint bind-mount override - see that repo's
+`docker-compose.override.yml.example`):
+
+```bash
+docker compose up -d --build \
+  --build-arg BUILD_FLASH_ATTN=1
+```
+
+with `CHATTERBOX_USE_FLASH_ATTN=1` set at runtime to actually use the
+flash-attn build - the build arg alone only controls compilation, not
+whether the running service uses it.
+
 ## Latest Release: Chatterbox Multilingual V3
 
 **Chatterbox Multilingual V3** is the latest general-purpose multilingual TTS model in the Chatterbox family. It keeps the same 0.5B model size while improving speaker similarity, reducing hallucinations, and producing more natural, conversational speech across languages.
