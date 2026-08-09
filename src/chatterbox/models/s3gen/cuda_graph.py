@@ -112,7 +112,23 @@ class CFMDecodeGraph:
             out = self._forward_once(bucket)
         self._graphs[bucket] = graph
         self._buffers[bucket]["out"] = out
-        return out
+        # `torch.cuda.graph(...)` CAPTURE IS PURE TRACING - confirmed via a
+        # direct, isolated test (a trivial `y.copy_(x + 1)` capture, with
+        # `y` explicitly zeroed beforehand, stayed all-zero immediately
+        # after the `with torch.cuda.graph(...)` block ended and only
+        # became correct after an explicit `.replay()`). `out` above is
+        # freshly allocated inside the graph's own private memory pool
+        # during that untraced pass, so its content at this point is
+        # uninitialized/undefined, NOT a real forward pass result -
+        # replaying once, right here, is what actually computes it. This
+        # class's own real-GPU correctness test caught this: without this
+        # replay, the graph path returned all-zero output instead of a
+        # real CFM result, while comparison against a genuine eager
+        # reference (cfm.cuda_graph = None) was masked by an earlier,
+        # separately-fixed buffer-aliasing bug that made two views into
+        # the same buffer trivially compare equal.
+        graph.replay()
+        return self._buffers[bucket]["out"]
 
     def run(
         self, t_actual: int, *, mu: torch.Tensor, mask: torch.Tensor, spks: torch.Tensor, cond: torch.Tensor,
