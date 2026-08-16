@@ -211,14 +211,37 @@ class T3(nn.Module):
         )  # (B, seq, vocab_size)
 
         # Calc CCE losses
+        #
+        # Two fixes vs. the naive version:
+        #   1. Class-dim shape: text_logits/speech_logits are (B, len, vocab) - class dim
+        #      LAST - but F.cross_entropy requires the class dim at position 1 for inputs
+        #      with more than 2 dims. Fixed by transposing to (B, vocab, len).
+        #   2. Next-token shift: hidden_states[:, len_cond+j] (see forward(), above) is the
+        #      causal transformer's output *after* consuming text_tokens[:, j] / speech_tokens[:, j]
+        #      as input at that position - i.e. it's the model's prediction of what comes
+        #      NEXT, exactly mirroring inference() which samples from output.logits[:, -1, :]
+        #      (the logits at the position of the last *fed-in* token) to produce the next
+        #      token. Comparing logits[:, j] against tokens[:, j] (same position) instead of
+        #      tokens[:, j+1] lets the model hit near-zero loss via a trivial identity/
+        #      reconstruction shortcut instead of learning to predict the next token. Fixed
+        #      by shifting targets by one position; each row's final real position is
+        #      excluded from the loss since it has no real next-token target within this
+        #      batch (for text: the token after the row's stop_text_token is the row's first
+        #      speech token, start_speech_token, a constant; for speech: nothing follows the
+        #      row's own stop_speech_token).
         IGNORE_ID = -100
         device = out.text_logits.device
-        mask_text = torch.arange(len_text, device=device)[None] >= text_token_lens[:, None]  # (B, len_text)
-        mask_speech = torch.arange(len_speech, device=device)[None] >= speech_token_lens[:, None]  # (B, len_speech)
-        masked_text = text_tokens.masked_fill(mask_text, IGNORE_ID)
-        masked_speech = speech_tokens.masked_fill(mask_speech, IGNORE_ID)
-        loss_text = F.cross_entropy(out.text_logits, masked_text, ignore_index=IGNORE_ID)
-        loss_speech = F.cross_entropy(out.speech_logits, masked_speech, ignore_index=IGNORE_ID)
+
+        text_targets = F.pad(text_tokens[:, 1:], (0, 1), value=IGNORE_ID)
+        mask_text = torch.arange(len_text, device=device)[None] >= (text_token_lens[:, None] - 1)  # (B, len_text)
+        masked_text = text_targets.masked_fill(mask_text, IGNORE_ID)
+        loss_text = F.cross_entropy(out.text_logits.transpose(1, 2), masked_text, ignore_index=IGNORE_ID)
+
+        speech_logits = out.speech_logits[:, :-1, :]
+        speech_targets = speech_tokens[:, 1:]
+        mask_speech = torch.arange(len_speech - 1, device=device)[None] >= (speech_token_lens[:, None] - 1)  # (B, len_speech - 1)
+        masked_speech = speech_targets.masked_fill(mask_speech, IGNORE_ID)
+        loss_speech = F.cross_entropy(speech_logits.transpose(1, 2), masked_speech, ignore_index=IGNORE_ID)
 
         return loss_text, loss_speech
 
