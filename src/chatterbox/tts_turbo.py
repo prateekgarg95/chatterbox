@@ -6,6 +6,7 @@ from pathlib import Path
 import librosa
 import torch
 import perth
+from .watermark_utils import scoped_watermark_threads
 import pyloudnorm as ln
 
 from safetensors.torch import load_file
@@ -316,5 +317,6 @@ class ChatterboxTurboTTS:
             n_cfm_timesteps=2,
         )
         wav = wav.squeeze(0).detach().cpu().numpy()
-        watermarked_wav = self.watermarker.apply_watermark(wav, sample_rate=self.sr)
+        with scoped_watermark_threads():
+            watermarked_wav = self.watermarker.apply_watermark(wav, sample_rate=self.sr)
         return torch.from_numpy(watermarked_wav).unsqueeze(0)

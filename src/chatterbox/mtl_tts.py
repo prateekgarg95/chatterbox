@@ -5,6 +5,7 @@ import os
 import librosa
 import torch
 import perth
+from .watermark_utils import scoped_watermark_threads
 import torch.nn.functional as F
 from safetensors.torch import load_file as load_safetensors
 from huggingface_hub import snapshot_download
@@ -351,5 +352,6 @@ class ChatterboxMultilingualTTS:
             st_len = max(1, n_tokens - 1)
             wav = wav[: st_len * (S3GEN_SR // S3_TOKEN_RATE)]
 
-            watermarked_wav = self.watermarker.apply_watermark(wav, sample_rate=self.sr)
+            with scoped_watermark_threads():
+                watermarked_wav = self.watermarker.apply_watermark(wav, sample_rate=self.sr)
         return torch.from_numpy(watermarked_wav).unsqueeze(0)
