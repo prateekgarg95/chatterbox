@@ -378,9 +378,22 @@ class T3(nn.Module):
             logits = min_p_warper(ids_for_proc, logits)
             logits = top_p_warper(ids_for_proc, logits)
 
-            # Convert logits to probabilities and sample the next token.
+            # Convert logits to probabilities and sample (or greedily pick) the
+            # next token. Real, confirmed bug fix (2026-08-18): `do_sample`
+            # was accepted by this method's signature but never actually
+            # checked anywhere in this active loop - torch.multinomial ran
+            # unconditionally regardless of its value. The only real
+            # reference to `do_sample` in this whole method was inside the
+            # dead, commented-out `self.patched_model.generate(...)` call
+            # above (never executed) - `length_penalty` has the identical
+            # problem, also dead. Confirmed live: every `do_sample=False`
+            # call this project made before this fix was still silently
+            # sampling, not deterministic.
             probs = torch.softmax(logits, dim=-1)
-            next_token = torch.multinomial(probs, num_samples=1)  # shape: (B, 1)
+            if do_sample:
+                next_token = torch.multinomial(probs, num_samples=1)  # shape: (B, 1)
+            else:
+                next_token = probs.argmax(dim=-1, keepdim=True)  # shape: (B, 1)
 
             predicted.append(next_token)
             generated_ids = torch.cat([generated_ids, next_token], dim=1)
