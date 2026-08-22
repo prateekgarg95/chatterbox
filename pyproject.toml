@@ -19,7 +19,16 @@ dependencies = [
     "torch>=2.9.0; python_version >= '3.14'",
     "torchaudio==2.6.0; python_version < '3.14'",
     "torchaudio>=2.9.0; python_version >= '3.14'",
-    "transformers==5.2.0",
+    # Was ==5.2.0 (just "latest at the time" from an upstream PR, #491 -
+    # no compatibility rationale tied to this exact version). Bumped to
+    # 5.15.0 after finding a real, confirmed ~4.2x .generate() slowdown
+    # on 5.2.0 for ByT5 (google/byt5-small) - reproduced side-by-side on
+    # the same GPU, same model, same inputs, identical output: 375.7ms
+    # vs 88.6ms for 5 transliteration windows. Needed for
+    # chatterbox-hinglish's byt5-hindi-sentence-transliteration
+    # normalisation step (engines/chatterbox_hinglish/core/
+    # transliteration_byt5.py), which shares this venv with T3/S3Gen.
+    "transformers==5.15.0",
     "diffusers==0.29.0",
     "resemble-perth @ git+https://github.com/resemble-ai/Perth.git@master",
     "conformer==0.3.2",
